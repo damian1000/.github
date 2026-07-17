@@ -16,6 +16,10 @@ on:
         description: Test HTML report path(s) for the results artifact (newline-separated for multi-module).
         type: string
         default: build/reports/tests/test
+      upload-coverage:
+        description: Upload the JaCoCo report to Codecov. Off for private repos that have no Codecov.
+        type: boolean
+        default: true
     secrets:
       CODECOV_TOKEN:
         required: false
@@ -58,6 +62,7 @@ jobs:
         run: ./gradlew --no-daemon clean check
 
       - name: Upload coverage to Codecov
+        if: ${{ inputs.upload-coverage }}
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
