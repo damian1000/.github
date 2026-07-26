@@ -1,8 +1,13 @@
 # .github
 
-Shared CI for the `damian1000` repositories. The `ci`, `codeql`, and `dep-review` pipelines are
-defined once here as reusable workflows; each repository calls them so the pipeline is identical
-everywhere and changes land in one place.
+Shared CI for the `damian1000` repositories. The `ci`, `codeql`, `dep-review`, and
+`dependency-check` pipelines are defined once here as reusable workflows; each repository calls
+them so the pipeline is identical everywhere and changes land in one place.
+
+Every third-party action is pinned to a commit SHA with its version as a trailing comment. A
+mutable tag like `@v7` resolves at run time, so whoever can move that tag can change what runs
+against the repositories and their secrets. Dependabot's `github-actions` updates keep the pins
+current, arriving as reviewable pull requests.
 
 ## Reusable workflows
 
@@ -11,6 +16,7 @@ everywhere and changes land in one place.
 | `.github/workflows/ci.yml`           | Attribution-history gate, Spotless, coverage-gated build, Codecov, test-report artifact. |
 | `.github/workflows/codeql.yml`       | CodeQL analysis (`java-kotlin`).                            |
 | `.github/workflows/dep-review.yml`   | Dependency review; fails a PR on a high-severity advisory. |
+| `.github/workflows/dependency-check.yml` | Weekly OWASP dependency-check; fails on CVSS >= 7.0. Needs an `NVD_API_KEY` secret. |
 
 ## Consuming them
 
@@ -45,3 +51,20 @@ Multi-module repositories pass comma-separated coverage files and newline-separa
 
 `codeql.yml` and `dep-review.yml` callers take no inputs; they grant the token scopes the reusable
 job needs (`security-events: write` / `pull-requests: write`).
+
+`dependency-check.yml` runs on the caller's own weekly schedule. It is deliberately not part of
+`ci.yml`: the scan reports advisories published since the last build rather than anything about
+the diff, and pull requests are already gated by `dep-review.yml`. A multi-module root passes
+`task: dependencyCheckAggregate` and the aggregate report path:
+
+```yaml
+name: Dependency check
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+jobs:
+  scan:
+    uses: damian1000/.github/.github/workflows/dependency-check.yml@main
+    secrets: inherit
+```

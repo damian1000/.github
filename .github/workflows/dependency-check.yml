@@ -1,0 +1,74 @@
+name: Dependency check
+
+# Reusable OWASP dependency-check for every buildable damian1000 repo. Scheduled rather than
+# run per pull request: the scan is only as current as the NVD feed it downloads, so it finds
+# advisories published since the last build, not defects in the diff — dependency-review already
+# gates pull requests on advisories in what the diff adds. A weekly run is what catches a CVE
+# published against a dependency nobody touched.
+on:
+  workflow_call:
+    inputs:
+      task:
+        description: Gradle task to run — dependencyCheckAggregate at a multi-module root.
+        type: string
+        default: dependencyCheckAnalyze
+      report-paths:
+        description: Report path(s) uploaded as the run artifact.
+        type: string
+        default: build/reports/dependency-check-report.html
+    secrets:
+      NVD_API_KEY:
+        required: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Fail loudly rather than scanning without a key. Unauthenticated NVD callers get 5
+      # requests per 30 seconds against 50 with a key, which turns an update into tens of
+      # minutes and 403s — and a security scan that quietly degrades is worse than none.
+      - name: Require an NVD API key
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          if [ -z "$NVD_API_KEY" ]; then
+            echo "::error::NVD_API_KEY is not set. Request a free key at https://nvd.nist.gov/developers/request-an-api-key and add it as a repository or organisation secret."
+            exit 1
+          fi
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+
+      # The local NVD copy is the expensive part. Keyed by week so a stale database cannot
+      # outlive one scheduled run, with an unsuffixed prefix so the week's first run starts
+      # from last week's copy and updates it rather than downloading everything again.
+      - name: Cache the NVD data
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.gradle/dependency-check-data
+          key: nvd-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            nvd-${{ runner.os }}-
+
+      - name: Scan dependencies
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: ./gradlew --no-daemon ${{ inputs.task }}
+
+      - name: Publish the report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-check-report
+          path: ${{ inputs.report-paths }}
+          if-no-files-found: ignore
