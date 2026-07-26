@@ -63,7 +63,10 @@ jobs:
       - name: Scan dependencies
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
-        run: ./gradlew --no-daemon ${{ inputs.task }}
+        # dependencyCheckAggregate calls Task.project at execution time, which the
+        # configuration cache forbids; the repositories enable it by default. A one-off
+        # scheduled scan gains nothing from a reused configuration anyway.
+        run: ./gradlew --no-daemon --no-configuration-cache ${{ inputs.task }}
 
       - name: Publish the report
         if: always()
