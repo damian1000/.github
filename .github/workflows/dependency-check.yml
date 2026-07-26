@@ -66,7 +66,10 @@ jobs:
         # dependencyCheckAggregate calls Task.project at execution time, which the
         # configuration cache forbids; the repositories enable it by default. A one-off
         # scheduled scan gains nothing from a reused configuration anyway.
-        run: ./gradlew --no-daemon --no-configuration-cache ${{ inputs.task }}
+        # --no-parallel as well: the aggregate task resolves other projects'
+        # runtimeClasspath, which Gradle rejects without an exclusive lock when the
+        # repository enables parallel execution.
+        run: ./gradlew --no-daemon --no-configuration-cache --no-parallel ${{ inputs.task }}
 
       - name: Publish the report
         if: always()
