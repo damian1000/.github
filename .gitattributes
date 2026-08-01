@@ -1,0 +1,4 @@
+# Keep the working copy byte-identical to what CI checks out. Prettier's endOfLine default is
+# lf, so a CRLF working copy on Windows fails the lint job locally while the same commit passes
+# on the Linux runner — a gate nobody can reproduce is a gate nobody trusts.
+* text=auto eol=lf
