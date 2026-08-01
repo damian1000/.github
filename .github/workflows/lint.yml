@@ -1,0 +1,48 @@
+name: Lint
+
+# This repository defines reusable workflows only, so nothing here runs on its own pull
+# requests — every file is `on: workflow_call`. That left the repository every other
+# repository trusts at `@main` with no check to gate a merge on. This is that check.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # actionlint ships release binaries rather than an action, and its own install script
+      # lives on a mutable branch URL. Downloading a fixed version and verifying its published
+      # checksum is the same trust decision as pinning an action to a commit SHA.
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "${archive}" actionlint
+          install -m 755 actionlint /usr/local/bin/actionlint
+
+      - name: Lint workflow files
+        run: actionlint -color
+
+      - name: Set up Node # Prettier, matching the version the shared Spotless config pins
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      # Same formatter, version, and targets as the `config` Spotless block every buildable
+      # repository runs, so the shared workflows are held to the estate's formatting bar even
+      # though this repository has no Gradle build to run Spotless from.
+      - name: Check formatting
+        run: npx --yes prettier@3.4.2 --check ".github/**/*.{yml,yaml}" "*.md"

@@ -11,12 +11,26 @@ current, arriving as reviewable pull requests.
 
 ## Reusable workflows
 
-| Workflow                             | Purpose                                                    |
-| ------------------------------------ | ---------------------------------------------------------- |
-| `.github/workflows/ci.yml`           | Attribution-history gate, Spotless, coverage-gated build, Codecov, test-report artifact. |
-| `.github/workflows/codeql.yml`       | CodeQL analysis (`java-kotlin`).                            |
-| `.github/workflows/dep-review.yml`   | Dependency review; fails a PR on a high-severity advisory. |
-| `.github/workflows/dependency-check.yml` | Weekly OWASP dependency-check; fails on CVSS >= 7.0. Needs an `NVD_API_KEY` secret. |
+| Workflow                                 | Purpose                                                                                  |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `.github/workflows/ci.yml`               | Attribution-history gate, Spotless, coverage-gated build, Codecov, test-report artifact. |
+| `.github/workflows/codeql.yml`           | CodeQL analysis (`java-kotlin`).                                                         |
+| `.github/workflows/dep-review.yml`       | Dependency review; fails a PR on a high-severity advisory.                               |
+| `.github/workflows/dependency-check.yml` | Weekly OWASP dependency-check; fails on CVSS >= 7.0. Needs an `NVD_API_KEY` secret.      |
+
+## This repository's own gate
+
+`.github/workflows/lint.yml` is the one workflow here that is not reusable. Every other file
+is `on: workflow_call`, so none of them run against this repository's pull requests, which
+left the repository every caller references at `@main` with no check to require. The lint job
+runs `actionlint` over the workflow files and Prettier 3.4.2 over the YAML and Markdown — the
+same formatter, version, and targets as the `config` Spotless block in the shared convention
+plugins, so these files are held to the estate's bar without a Gradle build to run Spotless
+from.
+
+`actionlint` is installed from a fixed release archive whose published SHA-256 is verified
+before it runs. Its own installer script lives on a mutable branch URL, which is the same
+trust problem as a mutable action tag.
 
 ## Consuming them
 
@@ -42,11 +56,11 @@ jobs:
 Multi-module repositories pass comma-separated coverage files and newline-separated report paths:
 
 ```yaml
-    with:
-      coverage-report-files: core/build/reports/jacoco/test/jacocoTestReport.xml,app/build/reports/jacoco/test/jacocoTestReport.xml
-      test-report-paths: |
-        core/build/reports/tests/test
-        app/build/reports/tests/test
+with:
+  coverage-report-files: core/build/reports/jacoco/test/jacocoTestReport.xml,app/build/reports/jacoco/test/jacocoTestReport.xml
+  test-report-paths: |
+    core/build/reports/tests/test
+    app/build/reports/tests/test
 ```
 
 `codeql.yml` and `dep-review.yml` callers take no inputs; they grant the token scopes the reusable
