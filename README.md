@@ -1,9 +1,9 @@
 # .github
 
 Shared CI for the `damian1000` repositories. The `ci`, `codeql`, `dep-review`,
-`dependency-check`, and `dependency-submission` pipelines are defined once here as reusable
-workflows; each repository calls them so the pipeline is identical everywhere and changes land
-in one place.
+`dependency-check`, `dependency-submission`, and `automerge` pipelines are defined once here as
+reusable workflows; each repository calls them so the pipeline is identical everywhere and
+changes land in one place.
 
 Every third-party action is pinned to a commit SHA with its version as a trailing comment. A
 mutable tag like `@v7` resolves at run time, so whoever can move that tag can change what runs
@@ -19,6 +19,7 @@ current, arriving as reviewable pull requests.
 | `.github/workflows/dep-review.yml`            | Dependency review; fails a PR on a high-severity advisory.                                                             |
 | `.github/workflows/dependency-check.yml`      | Weekly OWASP dependency-check; fails on CVSS >= 7.0. Needs an `NVD_API_KEY` secret.                                    |
 | `.github/workflows/dependency-submission.yml` | Submits the resolved Gradle dependency graph. `dep-review.yml` and Dependabot alerts see no JVM dependency without it. |
+| `.github/workflows/automerge.yml`             | Enables auto-merge so GitHub squash-merges once the required checks pass. Needs an `AUTOMERGE_TOKEN` secret.           |
 
 ## This repository's own gate
 
@@ -47,6 +48,31 @@ thing reading real coordinates, and it runs on a schedule rather than against a 
 Callers trigger it on `push` to `main` and on `pull_request`: the comparison needs a snapshot
 for the base and for the head. `dep-review.yml` waits up to ten minutes for the pull request's
 snapshot rather than deciding on a graph that is still being written.
+
+## Why auto-merge does not use `GITHUB_TOKEN`
+
+GitHub does not raise workflow runs for events triggered by `GITHUB_TOKEN`. A merge performed
+with it therefore lands on `main` and starts nothing — no CI run against `main`, and, in the
+repositories that deploy on push, no deployment. The evidence is three Dependabot pull requests
+that auto-merged on 2026-07-14 under the previous `GITHUB_TOKEN` workflow:
+
+| Repository           | Merge commit | Check runs | Workflow runs |
+| -------------------- | ------------ | ---------- | ------------- |
+| bank-csv-to-qif      | `98f3eacf`   | none       | none          |
+| kotlin-blockchain    | `d8a9fc43`   | none       | none          |
+| sudoku-dancing-links | `153e95ee`   | none       | none          |
+
+`automerge.yml` merges with `AUTOMERGE_TOKEN`, a fine-grained personal access token, so the
+merge is attributed to a person and the push behaves like any other.
+
+It also runs on `pull_request_target` rather than `pull_request`. A `pull_request` run raised
+by Dependabot is given Dependabot's secret scope instead of the repository's Actions secrets,
+so the token would arrive empty. `pull_request_target` reads them because it runs in the base
+repository's context; the trigger is only hazardous when a workflow checks out and executes the
+pull request's code, and this one checks out nothing.
+
+Auto-merge is restricted to non-draft pull requests authored by `damian1000` or
+`dependabot[bot]`. These repositories are public, and a green build is not a review.
 
 ## Consuming them
 
@@ -112,4 +138,17 @@ on:
 jobs:
   submit:
     uses: damian1000/.github/.github/workflows/dependency-submission.yml@main
+```
+
+`automerge.yml` replaces each repository's `dependabot-automerge.yml`:
+
+```yaml
+name: Auto-merge
+on:
+  pull_request_target:
+    branches: [main]
+jobs:
+  auto-merge:
+    uses: damian1000/.github/.github/workflows/automerge.yml@main
+    secrets: inherit
 ```

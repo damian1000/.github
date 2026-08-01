@@ -1,0 +1,45 @@
+name: Auto-merge
+
+# Enables auto-merge on a pull request so GitHub squash-merges it once the required checks
+# pass. Branch protection remains the gate — this only removes the manual click after it.
+#
+# Two decisions are load-bearing:
+#
+# 1. It runs on `pull_request_target`, not `pull_request`. A `pull_request` run raised by
+#    Dependabot receives Dependabot's secret scope rather than the repository's Actions
+#    secrets, so the token below would arrive empty. `pull_request_target` runs in the base
+#    repository's context and can read them. That trigger is dangerous when a workflow checks
+#    out and executes the pull request's code; this one never checks anything out.
+#
+# 2. It merges with a token belonging to a person, not GITHUB_TOKEN. GitHub does not raise
+#    workflow runs for events triggered by GITHUB_TOKEN, so a GITHUB_TOKEN auto-merge lands on
+#    main and starts nothing: no CI on main, and — for the repositories that deploy on push —
+#    no deployment. Three Dependabot merges on 2026-07-14 (bank-csv-to-qif 98f3eacf,
+#    kotlin-blockchain d8a9fc43, sudoku-dancing-links 153e95ee) have no check runs and no
+#    workflow runs against their merge commits at all.
+on:
+  workflow_call:
+    secrets:
+      AUTOMERGE_TOKEN:
+        description: Fine-grained PAT with contents and pull-requests write.
+        required: true
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    # An allowlist rather than "any pull request": these repositories are public, and a green
+    # build is not a review. Anyone could otherwise open a fork pull request that merges itself.
+    # Drafts are excluded so work in progress does not land the moment its checks go green.
+    if: >-
+      !github.event.pull_request.draft &&
+      (github.event.pull_request.user.login == 'damian1000' ||
+       github.event.pull_request.user.login == 'dependabot[bot]')
+    steps:
+      - name: Enable auto-merge
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+        # `--auto` asks GitHub to merge when the required checks pass. It fails when the
+        # repository has no required status checks, because there would be nothing to wait for
+        # and the request would mean "merge now" — which is not what this workflow is for.
+        run: gh pr merge --auto --squash "$PR_URL"
