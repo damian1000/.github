@@ -23,9 +23,13 @@ current, arriving as reviewable pull requests.
 
 ## This repository's own gate
 
-`.github/workflows/lint.yml` is the one workflow here that is not reusable. Every other file
-is `on: workflow_call`, so none of them run against this repository's pull requests, which
-left the repository every caller references at `@main` with no check to require. The lint job
+`lint.yml` and `auto-merge.yml` are the two workflows here that are not reusable — everything
+else in the table is `on: workflow_call`. `auto-merge.yml` is an ordinary caller of
+`automerge.yml` beside it, so this repository is not a special case.
+
+`.github/workflows/lint.yml` exists because none of the reusable files run against this
+repository's own pull requests, which left the repository every caller references at `@main`
+with no check to require. The lint job
 runs `actionlint` over the workflow files and Prettier 3.4.2 over the YAML and Markdown — the
 same formatter, version, and targets as the `config` Spotless block in the shared convention
 plugins, so these files are held to the estate's bar without a Gradle build to run Spotless

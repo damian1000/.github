@@ -26,6 +26,10 @@ on:
         description: Override the task used to resolve every configuration.
         type: string
         default: ""
+      include-configurations:
+        description: Regex of Gradle configurations that contribute to the graph.
+        type: string
+        default: ^runtimeClasspath$
 
 jobs:
   submit:
@@ -50,8 +54,21 @@ jobs:
       # --no-configuration-cache by default for the same reason dependency-check.yml passes
       # it — the repositories enable the configuration cache in gradle.properties, and a job
       # that resolves every configuration once per push gains nothing from reusing one.
+      # Only runtimeClasspath contributes, which is the same restriction the OWASP scan already
+      # applies through `scanConfigurations`. Resolving every configuration walks the buildscript
+      # classpath too, and the snapshot labels all of it `runtime`. The first submission on
+      # market-data proved the cost: 11 Dependabot alerts, 3 of them high, every one against
+      # Jackson artifacts pulled in by Spotless and dependency-check. Its published runtime
+      # classpath is kotlin-stdlib, gson, slf4j and a Jackson BOM that carries no code, so
+      # nothing vulnerable shipped — and Dependabot's two update jobs failed, because the
+      # versions are not declared anywhere it can edit.
+      #
+      # runtimeClasspath rather than also compileClasspath: `compileOnly` dependencies do not
+      # ship, and this graph should describe what does. Test configurations are excluded for the
+      # same reason.
       - name: Generate and submit the dependency graph
         uses: gradle/actions/dependency-submission@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
         with:
           additional-arguments: ${{ inputs.additional-arguments }}
           dependency-resolution-task: ${{ inputs.dependency-resolution-task }}
+          dependency-graph-include-configurations: ${{ inputs.include-configurations }}
