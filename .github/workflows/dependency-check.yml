@@ -23,6 +23,10 @@ on:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    # Below the six-hour job ceiling, which GitHub reports as a cancelled run rather than a
+    # failed one and therefore does not notify on. orderbook and risk-engine both hit it on
+    # 2026-07-27 and reported nothing; a scan that has stopped running must say so.
+    timeout-minutes: 180
     permissions:
       contents: read
     steps:
@@ -49,11 +53,11 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
 
-      # The local NVD copy is the expensive part. Keyed by week so a stale database cannot
-      # outlive one scheduled run, with an unsuffixed prefix so the week's first run starts
-      # from last week's copy and updates it rather than downloading everything again.
-      - name: Cache the NVD data
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # The local NVD copy is the expensive part: downloading it cold takes hours. The key is
+      # unique per run so every run writes a fresh entry, and the prefix restore-key starts
+      # each run from the newest previous copy and updates it incrementally.
+      - name: Restore the NVD data
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.gradle/dependency-check-data
           key: nvd-${{ runner.os }}-${{ github.run_id }}
@@ -70,6 +74,18 @@ jobs:
         # runtimeClasspath, which Gradle rejects without an exclusive lock when the
         # repository enables parallel execution.
         run: ./gradlew --no-daemon --no-configuration-cache --no-parallel ${{ inputs.task }}
+
+      # Saved on failure as well. actions/cache skips its save step when the job fails, so a
+      # repository that failed the CVSS gate discarded the feed it had just spent hours
+      # downloading and started cold again the next week — a 4h34m run in
+      # kafka-streams-patterns on 2026-07-27, against one minute for a repository that hit
+      # its cache. The finding is what should fail the run, not the cost of the next one.
+      - name: Save the NVD data
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.gradle/dependency-check-data
+          key: nvd-${{ runner.os }}-${{ github.run_id }}
 
       - name: Publish the report
         if: always()
