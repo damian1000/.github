@@ -1,0 +1,57 @@
+name: Dependency submission
+
+# Submits a resolved Gradle dependency graph to GitHub's Dependency Submission API.
+#
+# Without this, GitHub sees no JVM dependencies at all. Its automatic detection reads
+# package-lock.json and workflow files, but it does not resolve a Gradle build, so a
+# repository's dependency graph held only its npm packages and the actions its workflows
+# call. Two things depend on that graph and were therefore inert for every JVM dependency
+# in the estate:
+#
+#   - Dependabot security alerts, which match the graph against the advisory database.
+#     "No open alerts" meant "nothing to match against", not "nothing vulnerable".
+#   - dep-review.yml, which compares the base and head graphs of a pull request. With no
+#     JVM entries on either side, `fail-on-severity: high` had nothing to fail on.
+#
+# OWASP dependency-check was consequently the only thing in the estate actually reading
+# JVM coordinates, and it runs on a schedule rather than against a diff.
+on:
+  workflow_call:
+    inputs:
+      additional-arguments:
+        description: Extra Gradle arguments for the resolution run.
+        type: string
+        default: --no-configuration-cache
+      dependency-resolution-task:
+        description: Override the task used to resolve every configuration.
+        type: string
+        default: ""
+
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    permissions:
+      # Writing the snapshot is the whole point of the job, so it is scoped to this workflow
+      # rather than widened in ci.yml. A pull request from a public fork cannot be granted
+      # this, but every pull request in this estate comes from a branch in its own repository.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      # Node is deliberately absent: the convention plugins' npm wiring only registers Exec
+      # tasks, and resolving configurations never executes them.
+      #
+      # --no-configuration-cache by default for the same reason dependency-check.yml passes
+      # it — the repositories enable the configuration cache in gradle.properties, and a job
+      # that resolves every configuration once per push gains nothing from reusing one.
+      - name: Generate and submit the dependency graph
+        uses: gradle/actions/dependency-submission@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+        with:
+          additional-arguments: ${{ inputs.additional-arguments }}
+          dependency-resolution-task: ${{ inputs.dependency-resolution-task }}
