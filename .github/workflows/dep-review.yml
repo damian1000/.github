@@ -1,6 +1,11 @@
 name: Dependency Review
 
 # Reusable dependency-review gate (fails a PR on a high-severity advisory).
+#
+# The comparison is only as good as the dependency graph behind it, and until
+# dependency-submission.yml existed that graph carried no JVM coordinates — this gate was
+# reviewing npm packages and GitHub Actions on repositories whose dependencies are almost
+# entirely Gradle. It now waits for the pull request's snapshot to arrive before deciding.
 on:
   workflow_call:
 
@@ -16,3 +21,7 @@ jobs:
         with:
           fail-on-severity: high
           comment-summary-in-pr: on-failure
+          # Both workflows start on the same `pull_request` event, so the review would
+          # otherwise read a graph the submission job has not finished writing.
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 600
