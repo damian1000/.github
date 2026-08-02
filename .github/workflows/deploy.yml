@@ -1,0 +1,258 @@
+name: Deploy
+
+# Reusable production deploy for every damian1000 service. Callers reduce to a `uses:` one-liner
+# passing only what genuinely differs: the service name, its distribution module, the public URL,
+# and the port answering /readyz on the box.
+#
+# It exists because the five services carried five hand-maintained copies of this file, and they
+# had already drifted apart in ways nobody chose: the readiness hold below was in two of them,
+# `systemctl enable` in four. Copies of a deploy script diverge silently, and the divergence is
+# only discovered during an incident.
+#
+# The deploy pipeline re-runs the full gate before packaging. CD owns its own go/no-go rather than
+# trusting a separate workflow, and ships the bytes it just tested.
+#
+# Release, health check and rollback are one remote script so the decision to roll back is made on
+# the box: a runner that dies between "restart" and "check" cannot leave a broken release serving
+# with nothing left to react to it.
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: >-
+          Service name. Names the systemd unit, the install directory on the box, and
+          deploy/<app>.service in the calling repository.
+        type: string
+        required: true
+      dist-module:
+        description: >-
+          Gradle module producing the distribution. Empty for a single-module root project. One
+          input rather than separate task and directory inputs, which could be set inconsistently.
+        type: string
+        default: ""
+      url:
+        description: Public URL recorded on the production environment.
+        type: string
+        required: true
+      health-port:
+        description: Local port answering /readyz on the box.
+        type: string
+        required: true
+      hold-seconds:
+        description: >-
+          Seconds readiness must still hold after it first appears. A single sample can pass in
+          the window before a service's first real self-check has run, so the gate re-probes
+          rather than trusting the first 200.
+        type: number
+        default: 15
+    secrets:
+      DEPLOY_SSH_KEY:
+        required: true
+      DEPLOY_HOST:
+        required: true
+      DEPLOY_USER:
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Node # Prettier (web + config formatting) runs under Spotless
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+
+      - name: Build, test, and package the distribution
+        env:
+          APP: ${{ inputs.app }}
+          MODULE: ${{ inputs.dist-module }}
+        run: |
+          set -euo pipefail
+          if [ -n "$MODULE" ]; then
+            ./gradlew --no-daemon clean check ":$MODULE:installDist"
+            install_root="$MODULE/build/install"
+          else
+            ./gradlew --no-daemon clean check installDist
+            install_root="build/install"
+          fi
+          tar -czf "$APP-dist.tar.gz" -C "$install_root" "$APP"
+
+      - name: Upload distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.app }}-dist
+          path: ${{ inputs.app }}-dist.tar.gz
+          if-no-files-found: error
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    environment:
+      name: production
+      url: ${{ inputs.url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # for the deploy/ directory: the service unit, the pinned host key, and any post-release.sh
+
+      - name: Download distribution
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.app }}-dist
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pinned host key rather than ssh-keyscan: trust-on-first-use accepts whatever answers
+          # on the address, so anything that could take over it would be handed the deploy key
+          # and the artifact. deploy/known_hosts.pub holds the key without the host field — an
+          # SSH host key is public by design, while the address stays in the secret.
+          awk -v host="$DEPLOY_HOST" '{ print host, $0 }' deploy/known_hosts.pub > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          printf 'Host *\n  StrictHostKeyChecking yes\n  IdentitiesOnly yes\n' > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      - name: Ship artifact and deploy directory
+        env:
+          APP: ${{ inputs.app }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          # Clear first: scp -r into an existing directory would nest a second copy inside it.
+          ssh -i ~/.ssh/deploy_key "$target" "rm -rf /tmp/$APP-deploy"
+          scp -i ~/.ssh/deploy_key "$APP-dist.tar.gz" "$target:/tmp/$APP-dist.tar.gz"
+          scp -r -i ~/.ssh/deploy_key deploy "$target:/tmp/$APP-deploy"
+
+      - name: Release, verify, and roll back on failure
+        env:
+          APP: ${{ inputs.app }}
+          HEALTH_PORT: ${{ inputs.health-port }}
+          HOLD_SECONDS: ${{ inputs.hold-seconds }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" \
+            bash -seuo pipefail "$APP" "$GITHUB_SHA" "$HEALTH_PORT" "$HOLD_SECONDS" <<'REMOTE'
+          app="$1"
+          release="${2:-manual-$(date +%Y%m%d%H%M%S)}"
+          port="$3"
+          hold_seconds="$4"
+
+          link="$HOME/$app"
+          releases="$HOME/releases/$app"
+          target="$releases/$release"
+          deploy_dir="/tmp/$app-deploy"
+          trap 'rm -rf "$deploy_dir"' EXIT
+
+          mkdir -p "$releases"
+          rm -rf "$target"
+          mkdir -p "$target"
+          tar -xzf "/tmp/$app-dist.tar.gz" -C "$target" --strip-components=1
+          rm -f "/tmp/$app-dist.tar.gz"
+
+          # Keep the host's unit in lockstep with the version-controlled one.
+          if ! cmp -s "$deploy_dir/$app.service" "/etc/systemd/system/$app.service"; then
+            sudo cp "$deploy_dir/$app.service" "/etc/systemd/system/$app.service"
+            sudo systemctl daemon-reload
+          fi
+          # Unconditional and idempotent: a rebuilt box has to come back up on its own, and
+          # enabling only when the unit file changed leaves that to whoever remembers.
+          sudo systemctl enable -q "$app"
+
+          # Remote work specific to one repository — extra units, timers, scripts. Invoked
+          # through bash so the file's exec bit is not load-bearing across scp and git.
+          if [ -f "$deploy_dir/post-release.sh" ]; then
+            echo "running deploy/post-release.sh"
+            DEPLOY_DIR="$deploy_dir" APP="$app" bash "$deploy_dir/post-release.sh"
+          fi
+
+          # First release under this scheme: the install path is still a real directory, so it
+          # becomes the rollback target rather than being deleted.
+          if [ -d "$link" ] && [ ! -L "$link" ]; then
+            previous="$releases/legacy"
+            rm -rf "$previous"
+            mv "$link" "$previous"
+          else
+            previous="$(readlink -f "$link" 2>/dev/null || true)"
+          fi
+
+          # Swapping a symlink through rename() is atomic: the service never sees a half-copied
+          # install, which the old "delete bin and lib, then copy" release could expose.
+          switch_to() {
+            ln -sfn "$1" "$link.staging"
+            mv -Tf "$link.staging" "$link"
+          }
+
+          healthy() {
+            [ "$(curl -fsS -o /dev/null -w '%{http_code}' "http://localhost:$port/readyz" || true)" = "200" ]
+          }
+
+          await_health() {
+            for attempt in $(seq 1 15); do
+              if healthy; then
+                echo "$1 healthy after ${attempt} attempt(s)"
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+
+          # Readiness has to appear and then hold. Services here go ready before their first real
+          # self-check completes — trading-system's /readyz is 503 while its two views disagree,
+          # and the desk's reports upstreams it has not reached yet — so a single sample can pass
+          # on a release that is about to fail.
+          holds() {
+            echo "re-checking readiness in ${hold_seconds}s"
+            sleep "$hold_seconds"
+            if healthy; then
+              echo "readiness held for ${hold_seconds}s"
+              return 0
+            fi
+            echo "readiness did not hold"
+            return 1
+          }
+
+          switch_to "$target"
+          sudo systemctl restart "$app"
+
+          if await_health "release $release" && holds; then
+            # Three releases is enough to roll back through without filling the disk.
+            find "$releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
+              | sort -rn | tail -n +4 | cut -d' ' -f2- | xargs -r rm -rf
+            rm -rf "$HOME/$app-prev"
+            exit 0
+          fi
+
+          echo "release $release did not reach and hold readiness"
+          if [ -n "$previous" ] && [ -d "$previous" ]; then
+            echo "rolling back to $previous"
+            switch_to "$previous"
+            sudo systemctl restart "$app"
+            await_health "rollback" || echo "rollback did not come up either — the service is down"
+          else
+            echo "no previous release to roll back to"
+          fi
+          exit 1
+          REMOTE
