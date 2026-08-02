@@ -1,0 +1,87 @@
+name: Release
+
+# Reusable release for every damian1000 repository that publishes tagged versions. Callers are a
+# thin `uses:` triggered by their own tag push.
+#
+# It exists for two reasons. The estate had 22 tags and one published release: the libraries other
+# repositories pin by version presented an empty Releases panel, and cutting a version was a
+# manual sequence against a standard (document 03) that says a library change is not delivered
+# until it is released and adopted. And the one repository that did have a release workflow was
+# the last in the estate on mutable action tags — while holding `contents: write`, the widest
+# grant anywhere here. Whoever can move a tag decides what runs against that token, so the pins
+# below are commit SHAs like everywhere else.
+#
+# `artifact-paths` is optional. Left empty the release is notes-only, which is what the
+# JitPack-built libraries need: JitPack builds the artifact from the tag itself, so attaching a
+# second copy would publish two things that could disagree.
+on:
+  workflow_call:
+    inputs:
+      build-command:
+        description: Gradle invocation that verifies the tag and produces any artifacts.
+        type: string
+        default: clean test
+      artifact-paths:
+        description: >-
+          Newline-separated globs of files to attach. Empty for a notes-only release. Matches are
+          staged together and checksummed as SHA256SUMS.txt.
+        type: string
+        default: ""
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # creating the release and uploading its assets
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Node # Prettier (web + config formatting) runs under Spotless
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+
+      # Verify the tag before publishing it. A release names a commit as tested, and an
+      # immutable version is the wrong place to discover that it was not.
+      - name: Verify the tagged commit
+        run: ./gradlew --no-daemon ${{ inputs.build-command }}
+
+      - name: Stage release artifacts
+        id: stage
+        env:
+          ARTIFACT_PATHS: ${{ inputs.artifact-paths }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(printf '%s' "$ARTIFACT_PATHS" | tr -d '[:space:]')" ]; then
+            echo "notes-only release; no artifacts to stage"
+            echo "staged=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p staging
+          while IFS= read -r pattern; do
+            [ -z "$pattern" ] && continue
+            # Unquoted on purpose: the caller supplies globs, and a pattern matching nothing is a
+            # release missing an artifact it promised, so fail rather than attach a partial set.
+            # shellcheck disable=SC2086
+            matches=$(ls -1 $pattern 2>/dev/null || true)
+            [ -z "$matches" ] && { echo "::error::no file matched '$pattern'"; exit 1; }
+            echo "$matches" | while IFS= read -r file; do cp "$file" staging/; done
+          done <<< "$ARTIFACT_PATHS"
+          ( cd staging && sha256sum ./* > SHA256SUMS.txt )
+          ls -la staging/
+          echo "staged=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          generate_release_notes: true
+          files: ${{ steps.stage.outputs.staged == 'true' && 'staging/*' || '' }}
