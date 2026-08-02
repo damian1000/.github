@@ -58,8 +58,13 @@ jobs:
       - name: Spotless check # ktlint for Kotlin/Java hygiene, Prettier for web + YAML/Markdown
         run: ./gradlew --no-daemon spotlessCheck
 
-      - name: Build, test, and enforce coverage
-        run: ./gradlew --no-daemon clean check
+      # `build`, not `check`: a task outside the check graph is invisible to every gate in the
+      # estate. stocks-analysis-us carried a fat-jar `jar` task that had never once succeeded —
+      # it failed on a duplicate META-INF/DEPENDENCIES entry — while its badge stayed green,
+      # because `check` does not depend on `jar`. `build` adds `assemble`, so packaging is gated
+      # too rather than left to whoever remembers to run it.
+      - name: Build, test, package, and enforce coverage
+        run: ./gradlew --no-daemon clean build
 
       - name: Upload coverage to Codecov
         if: ${{ inputs.upload-coverage }}
