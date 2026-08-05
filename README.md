@@ -1,9 +1,9 @@
 # .github
 
-Shared CI for the `damian1000` repositories. The `ci`, `codeql`, `dep-review`,
-`dependency-check`, `dependency-submission`, and `automerge` pipelines are defined once here as
-reusable workflows; each repository calls them so the pipeline is identical everywhere and
-changes land in one place.
+Shared CI and delivery for the `damian1000` repositories. The `ci`, `codeql`, `dep-review`,
+`dependency-check`, `dependency-submission`, `automerge`, `deploy`, and `release` pipelines are
+defined once here as reusable workflows; each repository calls them so the pipeline is identical
+everywhere and changes land in one place.
 
 Every third-party action is pinned to a commit SHA with its version as a trailing comment. A
 mutable tag like `@v7` resolves at run time, so whoever can move that tag can change what runs
@@ -12,14 +12,16 @@ current, arriving as reviewable pull requests.
 
 ## Reusable workflows
 
-| Workflow                                      | Purpose                                                                                                                |
-| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `.github/workflows/ci.yml`                    | Attribution-history gate, Spotless, coverage-gated build, Codecov, test-report artifact.                               |
-| `.github/workflows/codeql.yml`                | CodeQL analysis (`java-kotlin`).                                                                                       |
-| `.github/workflows/dep-review.yml`            | Dependency review; fails a PR on a high-severity advisory.                                                             |
-| `.github/workflows/dependency-check.yml`      | Weekly OWASP dependency-check; fails on CVSS >= 7.0. Needs an `NVD_API_KEY` secret.                                    |
-| `.github/workflows/dependency-submission.yml` | Submits the resolved Gradle dependency graph. `dep-review.yml` and Dependabot alerts see no JVM dependency without it. |
-| `.github/workflows/automerge.yml`             | Enables auto-merge so GitHub squash-merges once the required checks pass. Needs an `AUTOMERGE_TOKEN` secret.           |
+| Workflow                                      | Purpose                                                                                                                                                                |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.github/workflows/ci.yml`                    | Attribution-history gate, Spotless, coverage-gated build, Codecov, test-report artifact.                                                                               |
+| `.github/workflows/codeql.yml`                | CodeQL analysis (`java-kotlin`).                                                                                                                                       |
+| `.github/workflows/dep-review.yml`            | Dependency review; fails a PR on a high-severity advisory.                                                                                                             |
+| `.github/workflows/dependency-check.yml`      | Weekly OWASP dependency-check; fails on CVSS >= 7.0. Needs an `NVD_API_KEY` secret.                                                                                    |
+| `.github/workflows/dependency-submission.yml` | Submits the resolved Gradle dependency graph. `dep-review.yml` and Dependabot alerts see no JVM dependency without it.                                                 |
+| `.github/workflows/automerge.yml`             | Enables auto-merge so GitHub squash-merges once the required checks pass. Needs an `AUTOMERGE_TOKEN` secret.                                                           |
+| `.github/workflows/deploy.yml`                | Production deploy: re-runs the gate, ships the tested artifact, switches release atomically, gates on readiness, rolls back on the host. Needs the `DEPLOY_*` secrets. |
+| `.github/workflows/release.yml`               | Verifies a tagged commit, then publishes its release. Notes-only unless artifacts are named.                                                                           |
 
 ## This repository's own gate
 
@@ -77,6 +79,53 @@ pull request's code, and this one checks out nothing.
 
 Auto-merge is restricted to non-draft pull requests authored by `damian1000` or
 `dependabot[bot]`. These repositories are public, and a green build is not a review.
+
+## How a change reaches production
+
+`deploy.yml` runs on merge to `main` for every service. Five repositories previously carried five
+hand-maintained copies of it, and those copies had already drifted in ways nobody chose: the
+readiness hold existed in two of them, `systemctl enable` in four. A duplicated deploy script
+diverges quietly, and the divergence surfaces during an incident.
+
+The pipeline re-runs the full quality gate before packaging rather than trusting an earlier
+workflow, and ships the bytes it just tested. Delivery owns its own go/no-go.
+
+Four properties are the reason it is shaped this way:
+
+- **The host key is pinned** from a file in the calling repository, so the deploy authenticates the
+  host instead of trusting whatever answers on the address.
+- **The release switch is atomic.** Each release unpacks into its own directory and the install
+  path is moved onto it by renaming a symlink, so a restart can never observe a half-copied
+  install — which a copy-in-place release can.
+- **Readiness has to hold, not merely appear.** A single sample can pass in the window before a
+  service's first real self-check has run, so the gate re-probes after a wait. Services with slower
+  self-checks raise that wait rather than weakening the gate.
+- **Rollback is decided on the host.** Release, health check and rollback are one remote script, so
+  a runner that dies between restarting and checking cannot leave a broken release serving with
+  nothing left to react to it. Three releases are retained, which is what makes the rollback target
+  still there to point at.
+
+A service needing remote work beyond the unit sync provides `deploy/post-release.sh`, run after the
+sync and before the release switch. It is a file in the consuming repository rather than a workflow
+input, so the work stays reviewable in the repository it belongs to and the shared workflow never
+gains a way to inject arbitrary commands.
+
+## Releases
+
+`release.yml` publishes a release when a version tag is pushed. It does not create the tag: cutting
+a version stays deliberate.
+
+It verifies the tagged commit before publishing it. A release names a commit as tested, and an
+immutable version is the wrong place to discover that it was not.
+
+`artifact-paths` is optional, and empty is the common case. The libraries here are built from the
+tag by the consuming build service, so attaching a second copy of the artifact would publish two
+things that could disagree. Where files are attached they are staged together and checksummed into
+`SHA256SUMS.txt`.
+
+This is the only workflow here holding `contents: write`, the widest grant in the repository, which
+is why its actions are pinned to commit SHAs like everything else — whoever can move a mutable tag
+would otherwise decide what runs against that token.
 
 ## Consuming them
 
@@ -142,6 +191,57 @@ on:
 jobs:
   submit:
     uses: damian1000/.github/.github/workflows/dependency-submission.yml@main
+```
+
+`deploy.yml` callers pass only what genuinely differs between services, and serialise on a shared
+concurrency group so two releases never land at once:
+
+```yaml
+name: Deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One production deploy at a time; never cancel a release mid-flight.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    uses: damian1000/.github/.github/workflows/deploy.yml@main
+    with:
+      app: risk-engine
+      dist-module: app
+      url: https://risk.damianhoward.com
+      health-port: "8081"
+    secrets: inherit
+```
+
+`dist-module` is empty for a single-module root project. It is one input rather than a separate
+task and directory, which could be set inconsistently. `hold-seconds` defaults to 15 and is raised
+by services whose readiness genuinely takes longer to settle.
+
+`release.yml` callers are triggered by their own tag push and must widen the token grant
+themselves — the default is read-only, and a reusable workflow cannot request more than its caller
+holds:
+
+```yaml
+name: Release
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: damian1000/.github/.github/workflows/release.yml@main
+    with:
+      build-command: clean build
 ```
 
 `automerge.yml` replaces each repository's `dependabot-automerge.yml`:
