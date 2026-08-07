@@ -12,6 +12,12 @@ name: Deploy
 # The deploy pipeline re-runs the full gate before packaging. CD owns its own go/no-go rather than
 # trusting a separate workflow, and ships the bytes it just tested.
 #
+# That gate is `clean build`, matching ci.yml, and the difference is not cosmetic: `check` does not
+# depend on `jar`, so every packaging task sits outside it. stocks-analysis-us shipped a fat-jar
+# task that had never once succeeded while its badge stayed green on `clean check`. This workflow
+# ran `clean check` and called itself the full gate until 2026-08-07 — the 2026-08-02 change
+# reached ci.yml and the handbook but not the path that actually reaches production.
+#
 # Release, health check and rollback are one remote script so the decision to roll back is made on
 # the box: a runner that dies between "restart" and "check" cannot leave a broken release serving
 # with nothing left to react to it.
@@ -82,10 +88,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "$MODULE" ]; then
-            ./gradlew --no-daemon clean check ":$MODULE:installDist"
+            ./gradlew --no-daemon clean build ":$MODULE:installDist"
             install_root="$MODULE/build/install"
           else
-            ./gradlew --no-daemon clean check installDist
+            ./gradlew --no-daemon clean build installDist
             install_root="build/install"
           fi
           tar -czf "$APP-dist.tar.gz" -C "$install_root" "$APP"
