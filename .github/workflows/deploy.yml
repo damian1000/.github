@@ -51,6 +51,16 @@ on:
           rather than trusting the first 200.
         type: number
         default: 15
+      startup-seconds:
+        description: >-
+          How long a release may take to answer /readyz before it is treated as failed. The
+          default was an unnamed 30 and that was too tight: visitor-analytics opens an Oracle
+          wallet and runs Flyway against a remote Autonomous Database before it binds, which
+          takes 31 to 33 seconds, so a deploy on 2026-08-07 was rolled back one second before the
+          new release would have answered. Marginal budgets fail intermittently, which is the
+          worst way for a deploy gate to be wrong.
+        type: number
+        default: 90
     secrets:
       DEPLOY_SSH_KEY:
         required: true
@@ -155,15 +165,17 @@ jobs:
           APP: ${{ inputs.app }}
           HEALTH_PORT: ${{ inputs.health-port }}
           HOLD_SECONDS: ${{ inputs.hold-seconds }}
+          STARTUP_SECONDS: ${{ inputs.startup-seconds }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
           ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" \
-            bash -seuo pipefail "$APP" "$GITHUB_SHA" "$HEALTH_PORT" "$HOLD_SECONDS" <<'REMOTE'
+            bash -seuo pipefail "$APP" "$GITHUB_SHA" "$HEALTH_PORT" "$HOLD_SECONDS" "$STARTUP_SECONDS" <<'REMOTE'
           app="$1"
           release="${2:-manual-$(date +%Y%m%d%H%M%S)}"
           port="$3"
           hold_seconds="$4"
+          startup_seconds="$5"
 
           link="$HOME/$app"
           releases="$HOME/releases/$app"
@@ -214,8 +226,10 @@ jobs:
             [ "$(curl -fsS -o /dev/null -w '%{http_code}' "http://localhost:$port/readyz" || true)" = "200" ]
           }
 
+          # Budget in seconds rather than a bare attempt count, so the number in the workflow
+          # inputs means what it says and does not have to be divided by the sleep to be read.
           await_health() {
-            for attempt in $(seq 1 15); do
+            for attempt in $(seq 1 $(( startup_seconds / 2 )) ); do
               if healthy; then
                 echo "$1 healthy after ${attempt} attempt(s)"
                 return 0
