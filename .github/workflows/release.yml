@@ -20,7 +20,12 @@ on:
       build-command:
         description: Gradle invocation that verifies the tag and produces any artifacts.
         type: string
-        default: clean test
+        # `clean build`, matching ci.yml and deploy.yml. The default was `clean test` — weaker than
+        # both, skipping Spotless, JaCoCo verification and assemble — while this workflow's whole
+        # argument is that a tag is verified before it is published. Every current caller overrode
+        # it, so nothing shipped unverified; a default nobody uses is still the one the next caller
+        # inherits.
+        default: clean build
       artifact-paths:
         description: >-
           Newline-separated globs of files to attach. Empty for a notes-only release. Matches are
