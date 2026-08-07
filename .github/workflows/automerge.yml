@@ -39,7 +39,18 @@ jobs:
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
-        # `--auto` asks GitHub to merge when the required checks pass. It fails when the
-        # repository has no required status checks, because there would be nothing to wait for
-        # and the request would mean "merge now" — which is not what this workflow is for.
+        # `--auto` asks GitHub to merge when the required checks pass.
+        #
+        # It does NOT fail when a repository has no required status checks — this comment used to
+        # claim it did, and that claim is what kept the consequence invisible. With nothing to
+        # wait for, `--auto` degrades to "merge now" and squashes the pull request immediately.
+        # visitor-analytics is where that showed up: private on the free plan, so branch
+        # protection was unavailable, so four consecutive pull requests merged 11 to 19 seconds
+        # after opening and main took commits nothing had built. Comparable orderbook pull
+        # requests take about two and a half minutes.
+        #
+        # So this workflow is only a gate where branch protection already is one. Before adding
+        # the caller to a repository, confirm main is protected with a required check — and if
+        # it cannot be, do not add the caller, because there is nothing here to make merging
+        # safe on its own.
         run: gh pr merge --auto --squash "$PR_URL"
